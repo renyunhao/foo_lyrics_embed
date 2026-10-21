@@ -54,13 +54,14 @@
       <AdditionalIncludeDirectories>../SDK-2026-10-01/foobar2000;../SDK-2026-10-01;compact_enc_det;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <DataExecutionPrevention>
       </DataExecutionPrevention>
-      <AdditionalDependencies>../SDK-2026-10-01/foobar2000/shared/shared-$(Platform).lib;user32.lib;ole32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>../SDK-2026-10-01/foobar2000/shared/shared-$(Platform).lib;user32.lib;ole32.lib;shell32.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -70,7 +71,7 @@
       <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalOptions>/d2notypeopt %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /d2notypeopt %(AdditionalOptions)</AdditionalOptions>
       <TreatSpecificWarningsAsErrors>4715</TreatSpecificWarningsAsErrors>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <StringPooling>true</StringPooling>
@@ -87,11 +88,15 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <DataExecutionPrevention>
       </DataExecutionPrevention>
-      <AdditionalDependencies>../SDK-2026-10-01/foobar2000/shared/shared-$(Platform).lib;user32.lib;ole32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>../SDK-2026-10-01/foobar2000/shared/shared-$(Platform).lib;user32.lib;ole32.lib;shell32.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="lyrics_batch.cpp" />
     <ClCompile Include="lyrics_embed.cpp" />
+    <ClCompile Include="lyrics_log_window.cpp" />
+    <ClCompile Include="lyrics_quality.cpp" />
+    <ClCompile Include="lyrics_sources.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="PCH.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
@@ -127,6 +132,10 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="lyrics_common.h" />
+    <ClInclude Include="lyrics_log_window.h" />
+    <ClInclude Include="lyrics_quality.h" />
+    <ClInclude Include="lyrics_sources.h" />
     <ClInclude Include="stdafx.h" />
   </ItemGroup>
   <ItemGroup>

@@ -49,8 +49,6 @@ static UINT EncodingToCodePage(Encoding enc) {
     }
 }
 
-static const char g_utf8BOM[] = { (char)0xEF, (char)0xBB, (char)0xBF };
-
 static bool ConvertToUTF8(const char* raw, int rawLen, UINT srcCodePage, pfc::string8& out) {
     pfc::string8 converted;
     if (srcCodePage == 65001) {
@@ -68,8 +66,7 @@ static bool ConvertToUTF8(const char* raw, int rawLen, UINT srcCodePage, pfc::st
         WideCharToMultiByte(CP_UTF8, 0, wideBuf.get_ptr(), wideLen, utf8Buf.get_ptr(), utf8Len, nullptr, nullptr);
         converted.set_string(utf8Buf.get_ptr(), utf8Len);
     }
-    out.set_string(g_utf8BOM, 3);
-    out += converted;
+    out = converted;
     return true;
 }
 
@@ -105,10 +102,8 @@ static bool FindLyricsFile(const char* audioPath, pfc::string8& lyricsPath) {
         lyricsPath += g_lyricsExtensions[i];
         try {
             abort_callback_dummy aborter;
-            filesystem::g_exists(lyricsPath, aborter);
-            return true;
+            if (filesystem::g_exists(lyricsPath, aborter)) return true;
         } catch (...) {
-            continue;
         }
     }
     return false;
@@ -134,8 +129,7 @@ static bool ReadLyricsContent(const char* lyricsPath, pfc::string8& content) {
         if (rawLen >= 3 && (unsigned char)rawData[0] == 0xEF &&
             (unsigned char)rawData[1] == 0xBB &&
             (unsigned char)rawData[2] == 0xBF) {
-            content.set_string(g_utf8BOM, 3);
-            content += (rawData + 3);
+            content.set_string(rawData + 3, rawLen - 3);
             return true;
         }
 
@@ -147,8 +141,7 @@ static bool ReadLyricsContent(const char* lyricsPath, pfc::string8& content) {
                 pfc::array_t<char> utf8Buf;
                 utf8Buf.set_size(utf8Len);
                 WideCharToMultiByte(CP_UTF8, 0, (const WCHAR*)(rawData + 2), wideLen, utf8Buf.get_ptr(), utf8Len, nullptr, nullptr);
-                content.set_string(g_utf8BOM, 3);
-                content += pfc::string8(utf8Buf.get_ptr(), utf8Len);
+                content.set_string(utf8Buf.get_ptr(), utf8Len);
                 return true;
             }
         }
@@ -167,8 +160,7 @@ static bool ReadLyricsContent(const char* lyricsPath, pfc::string8& content) {
                 pfc::array_t<char> utf8Buf;
                 utf8Buf.set_size(utf8Len);
                 WideCharToMultiByte(CP_UTF8, 0, swapped.get_ptr(), wideLen, utf8Buf.get_ptr(), utf8Len, nullptr, nullptr);
-                content.set_string(g_utf8BOM, 3);
-                content += pfc::string8(utf8Buf.get_ptr(), utf8Len);
+                content.set_string(utf8Buf.get_ptr(), utf8Len);
                 return true;
             }
         }
