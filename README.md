@@ -18,13 +18,14 @@
 
 ### 批量整理内嵌歌词
 
-菜单入口：`Library → 内嵌歌词`，包含六个命令：
+菜单入口：`Library → 内嵌歌词`，包含五个命令：
 
 | 命令 | 行为 |
 | --- | --- |
 | 扫描并整理内嵌歌词 | 按规范校验，必要时本地修复或联网搜索，并写回 `LYRICS` |
 | 仅检测内嵌歌词（不写入） | 只校验并输出报告，不修改任何文件（dry-run） |
 | 根据文件名推断标签 | 独立功能：只按模板补全 `TITLE` / `ARTIST`，不读取或修改歌词 |
+| 删除备份的歌词 | 删除 `ORIGINAL_LYRICS` 备份 Tag，保留 `LYRICS`；执行前需确认 |
 | 编辑配置 | 创建/打开统一的 `foo_lyrics_embed_config.txt`，内含运行参数、忽略目录与文件名模板 |
 
 - 扫描范围：播放列表中被选中的曲目；未选中任何曲目时扫描整个当前播放列表
@@ -35,6 +36,15 @@
 - 忽略目录：读取统一配置的 `[skip]` 段，每行一个目录，匹配不区分大小写，支持文件夹名（`Tune`）、路径片段（`Music\Tune`）或完整路径（`D:\Music\Tune`）；`#` 开头为注释。命中的曲目在报告中记为“跳过（忽略目录）”
 - 写回前若已有 `LYRICS`，其原始内容会备份到 `ORIGINAL_LYRICS` Tag（仅在该 Tag 尚不存在时备份）
 - 报告写入 `profile\foo_lyrics_embed_report.txt`（UTF-8 BOM），最终汇总同时输出到控制台和日志窗口
+
+#### 删除备份的歌词
+
+- 菜单：`Library → 内嵌歌词 → 删除备份的歌词`
+- 删除选中曲目（未选中时为整个播放列表）的 `ORIGINAL_LYRICS` Tag，`LYRICS` 歌词本身不受影响
+- 执行前弹出确认框；此操作不可撤销
+- 无备份的曲目记为“无备份”，不会写入文件
+- 不联网、不读取歌词正文，也不套用忽略目录
+- 报告写入 `profile\foo_lyrics_embed_cleanup_report.txt`，汇总同时输出到控制台和日志窗口
 
 #### 文件名推断与标签回填
 
@@ -213,6 +223,7 @@ msbuild foo_lyrics_embed\foo_lyrics_embed.sln /p:Configuration=Release /p:Platfo
 4. 再执行 `Library → 内嵌歌词 → 扫描并整理内嵌歌词` 写入
 5. 查看 `View → Console` 或 `profile\foo_lyrics_embed_report.txt` 获取逐曲目明细
 6. 需要回滚时，可从 `ORIGINAL_LYRICS` Tag 取回被覆盖前的歌词
+7. 确认不再需要回滚后，可执行 `Library → 内嵌歌词 → 删除备份的歌词` 清理备份 Tag
 
 ### 注意事项
 

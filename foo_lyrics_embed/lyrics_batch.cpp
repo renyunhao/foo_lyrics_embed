@@ -14,6 +14,7 @@
 #include <mutex>
 #include <thread>
 
+#include <SDK/messageBox.h>
 #include <shellapi.h>
 
 using namespace lyrics;
@@ -22,9 +23,10 @@ namespace {
 
 const char* kReportFileName = "foo_lyrics_embed_report.txt";
 const char* kTagsReportFileName = "foo_lyrics_embed_tags_report.txt";
+const char* kCleanupReportFileName = "foo_lyrics_embed_cleanup_report.txt";
 const char* kConfigFileName = "foo_lyrics_embed_config.txt";
 
-enum class batch_mode { lyrics, tags };
+enum class batch_mode { lyrics, tags, cleanup };
 
 // ---------------------------------------------------------------- 忽略目录
 
@@ -233,6 +235,7 @@ struct item_result {
 	bool failed = false;
 	bool written = false;
 	bool processed = false;
+	bool remove_original = false;
 };
 
 std::string meta_join(const file_info& info, const char* name) {
@@ -559,10 +562,46 @@ void process_tags_one(metadb_handle_ptr item, item_result& r,
 	}
 }
 
+// 独立功能：只删除 LYRICS 的备份 Tag，不读取或修改歌词正文
+void process_cleanup_one(metadb_handle_ptr item, item_result& r, abort_callback& aborter) {
+	std::string path = item->get_path();
+
+	if (filesystem::g_is_remote_safe(path.c_str())) {
+		r.verdict = "跳过";
+		r.action = "跳过";
+		r.reason = "网络流或非本地文件";
+		return;
+	}
+
+	file_info_impl info;
+	{
+		auto lock = file_lock_manager::get()->acquire_read(path.c_str(), aborter);
+		service_ptr_t<input_info_reader> reader;
+		input_entry::g_open_for_info_read(reader, nullptr, path.c_str(), aborter);
+		reader->get_info(item->get_subsong_index(), info, aborter);
+	}
+
+	r.title = meta_join(info, "TITLE");
+	r.artist = meta_join(info, "ARTIST");
+
+	if (info.meta_find("ORIGINAL_LYRICS") == pfc::infinite_size) {
+		r.verdict = "无备份";
+		r.action = "无备份";
+		r.reason = "没有 ORIGINAL_LYRICS 备份";
+		return;
+	}
+
+	r.verdict = "有备份";
+	r.action = "删除备份";
+	r.reason = "删除 ORIGINAL_LYRICS，保留 LYRICS";
+	r.remove_original = true;
+}
+
 struct tag_patch {
 	bool has_lyrics = false;
 	bool has_title = false;
 	bool has_artist = false;
+	bool remove_original = false;
 	std::string lyrics;
 	std::string title;
 	std::string artist;
@@ -582,6 +621,7 @@ tag_patch make_patch(const item_result& r) {
 		p.has_artist = true;
 		p.artist = r.patch_artist;
 	}
+	p.remove_original = r.remove_original;
 	return p;
 }
 
@@ -594,16 +634,28 @@ public:
 		auto it = m_changes.find(std::string(loc->get_path()));
 		if (it == m_changes.end()) return false;
 		const tag_patch& p = it->second;
+		bool changed = false;
 
+		if (p.remove_original && info.meta_find("ORIGINAL_LYRICS") != pfc::infinite_size) {
+			info.meta_remove_field("ORIGINAL_LYRICS");
+			changed = true;
+		}
 		if (p.has_lyrics) {
 			const char* current = info.meta_get("LYRICS", 0);
 			if (current && *current && info.meta_find("ORIGINAL_LYRICS") == pfc::infinite_size)
 				info.meta_set("ORIGINAL_LYRICS", current);
 			info.meta_set("LYRICS", strip_bom(p.lyrics).c_str());
+			changed = true;
 		}
-		if (p.has_title) info.meta_set("TITLE", p.title.c_str());
-		if (p.has_artist) info.meta_set("ARTIST", p.artist.c_str());
-		return true;
+		if (p.has_title) {
+			info.meta_set("TITLE", p.title.c_str());
+			changed = true;
+		}
+		if (p.has_artist) {
+			info.meta_set("ARTIST", p.artist.c_str());
+			changed = true;
+		}
+		return changed;
 	}
 
 private:
@@ -633,9 +685,10 @@ public:
 		std::atomic<int> write_status{(int)metadb_io::update_info_success};
 
 		if (m_log) {
+			const char* mode_name = m_mode == batch_mode::tags ? "根据文件名推断标签"
+				: m_mode == batch_mode::cleanup ? "删除歌词备份" : "整理内嵌歌词";
 			std::string head = "开始扫描：" + std::to_string(total) + " 首（" +
-				(m_mode == batch_mode::tags ? "根据文件名推断标签" : "整理内嵌歌词") +
-				"，并发 " + std::to_string(m_concurrency) + "）";
+				mode_name + "，并发 " + std::to_string(m_concurrency) + "）";
 			m_log->log_line(head);
 			m_log->set_progress(0, (int)total, 0, 0, 0, 0);
 		}
@@ -652,7 +705,7 @@ public:
 			r.dry_run = m_dry_run;
 			r.processed = true;
 
-			if (is_skipped_path(item->get_path(), m_skip_dirs, aborter)) {
+			if (m_mode != batch_mode::cleanup && is_skipped_path(item->get_path(), m_skip_dirs, aborter)) {
 				r.verdict = "跳过";
 				r.action = "跳过";
 				r.reason = "忽略目录（过滤列表）";
@@ -671,6 +724,8 @@ public:
 			try {
 				if (m_mode == batch_mode::tags)
 					process_tags_one(item, r, m_tpl, aborter);
+				else if (m_mode == batch_mode::cleanup)
+					process_cleanup_one(item, r, aborter);
 				else
 					process_one(item, r, m_tpl, item_log, aborter);
 			} catch (exception_aborted const&) {
@@ -682,8 +737,12 @@ public:
 			}
 
 			if (r.failed) a_failed.fetch_add(1);
-			else if (r.action == "无候选") a_no_candidate.fetch_add(1);
 			else if (r.action == "跳过") a_skipped.fetch_add(1);
+			else if (m_mode == batch_mode::cleanup) {
+				if (r.remove_original) a_changed.fetch_add(1);
+				else a_no_candidate.fetch_add(1);
+			}
+			else if (r.action == "无候选") a_no_candidate.fetch_add(1);
 			else if (r.changed || !r.patch_title.empty() || !r.patch_artist.empty()) a_changed.fetch_add(1);
 			else a_kept.fetch_add(1);
 
@@ -697,7 +756,7 @@ public:
 			}
 
 			tag_patch p = m_dry_run ? tag_patch() : make_patch(r);
-			bool has_patch = p.has_lyrics || p.has_title || p.has_artist;
+			bool has_patch = p.has_lyrics || p.has_title || p.has_artist || p.remove_original;
 
 			m_results[i] = std::move(r);
 
@@ -818,10 +877,13 @@ private:
 	static void finalize(const std::vector<item_result>& results, bool aborted, int write_status,
 		batch_mode mode, batch_log* log) {
 		int kept = 0, changed = 0, no_candidate = 0, failed = 0, skipped = 0, tags_filled = 0;
+		int deleted = 0, no_backup = 0;
 		bool dry_run = false;
 		const bool tags_mode = mode == batch_mode::tags;
+		const bool cleanup_mode = mode == batch_mode::cleanup;
 		std::string report;
-		report += tags_mode ? "根据文件名推断标签报告\n" : "内嵌歌词整理报告\n";
+		report += tags_mode ? "根据文件名推断标签报告\n"
+			: cleanup_mode ? "歌词备份清理报告\n" : "内嵌歌词整理报告\n";
 		report += "时间: " + now_string() + "\n";
 
 		int processed = 0;
@@ -831,6 +893,8 @@ private:
 			if (r.dry_run) dry_run = true;
 			if (!r.patch_title.empty() || !r.patch_artist.empty()) tags_filled++;
 			if (r.failed) failed++;
+			else if (r.action == "删除备份") deleted++;
+			else if (r.action == "无备份") no_backup++;
 			else if (r.action == "无候选") no_candidate++;
 			else if (r.action == "保持") kept++;
 			else if (r.action == "跳过") skipped++;
@@ -840,22 +904,30 @@ private:
 		std::string mode_text;
 		if (aborted) mode_text = dry_run ? "已中止（未写入）" : "已中止（已处理部分已写入）";
 		else if (dry_run) mode_text = "仅检测（未写入）";
-		else mode_text = tags_mode ? "补全标签" : "写入";
+		else mode_text = tags_mode ? "补全标签" : cleanup_mode ? "删除备份" : "写入";
 		report += "模式: " + mode_text + "\n";
 		if (dry_run)
 			report += "说明: 本次为 dry-run，所有“补标签/修改”均未写入文件。\n";
 		else if (!aborted && write_status >= 0)
 			report += std::string("写入状态: ") + (write_status == (int)metadb_io::update_info_success
 				? "成功" : ("失败（" + std::to_string(write_status) + "）")) + "\n";
-		report += "曲目: " + std::to_string(processed) +
-			"  保持: " + std::to_string(kept) +
-			"  " + ((aborted || dry_run) ? "拟补标签: " : "补标签: ") + std::to_string(tags_filled);
-		if (!tags_mode) {
-			report += std::string("  ") + ((aborted || dry_run) ? "拟修改: " : "修改: ") + std::to_string(changed) +
-				"  无候选: " + std::to_string(no_candidate);
+		if (cleanup_mode) {
+			report += "曲目: " + std::to_string(processed) +
+				"  " + (aborted ? "拟删除: " : "已删除: ") + std::to_string(deleted) +
+				"  无备份: " + std::to_string(no_backup) +
+				"  跳过: " + std::to_string(skipped) +
+				"  失败: " + std::to_string(failed) + "\n\n";
+		} else {
+			report += "曲目: " + std::to_string(processed) +
+				"  保持: " + std::to_string(kept) +
+				"  " + ((aborted || dry_run) ? "拟补标签: " : "补标签: ") + std::to_string(tags_filled);
+			if (!tags_mode) {
+				report += std::string("  ") + ((aborted || dry_run) ? "拟修改: " : "修改: ") + std::to_string(changed) +
+					"  无候选: " + std::to_string(no_candidate);
+			}
+			report += "  跳过: " + std::to_string(skipped) +
+				"  失败: " + std::to_string(failed) + "\n\n";
 		}
-		report += "  跳过: " + std::to_string(skipped) +
-			"  失败: " + std::to_string(failed) + "\n\n";
 
 		for (size_t i = 0; i < results.size(); i++) {
 			const auto& r = results[i];
@@ -864,7 +936,8 @@ private:
 			if (!r.artist.empty()) report += " - " + r.artist;
 			report += "\n";
 			report += "    文件: " + r.path + "\n";
-			report += "    判定: " + r.verdict + " (" + std::to_string(r.score) + ")";
+			report += "    判定: " + r.verdict;
+			if (!cleanup_mode) report += " (" + std::to_string(r.score) + ")";
 			if (!r.source.empty()) report += "  来源: " + r.source;
 			report += "\n";
 			if (!r.reason.empty()) report += "    说明: " + r.reason + "\n";
@@ -876,7 +949,8 @@ private:
 			}
 		}
 
-		const char* report_name = tags_mode ? kTagsReportFileName : kReportFileName;
+		const char* report_name = tags_mode ? kTagsReportFileName
+			: cleanup_mode ? kCleanupReportFileName : kReportFileName;
 		write_report(report, report_name);
 		console::print(report.c_str());
 
@@ -885,6 +959,11 @@ private:
 			summary << (aborted ? "标签补全已中止：" : "标签补全完成：") << "共 " << processed << " 首，"
 				<< ((aborted) ? "拟补标签 " : "已补标签 ") << tags_filled << " 首，"
 				<< "保持 " << kept << " 首，跳过 " << skipped << " 首，"
+				<< "失败 " << failed << " 首。\n\n报告已保存到配置目录下的 " << report_name;
+		} else if (cleanup_mode) {
+			summary << (aborted ? "歌词备份清理已中止：" : "歌词备份清理完成：") << "共 " << processed << " 首，"
+				<< (aborted ? "拟删除 " : "已删除 ") << deleted << " 首，"
+				<< "无备份 " << no_backup << " 首，跳过 " << skipped << " 首，"
 				<< "失败 " << failed << " 首。\n\n报告已保存到配置目录下的 " << report_name;
 		} else {
 			summary << (aborted ? "歌词整理已中止：" : "歌词整理完成：") << "共 " << processed << " 首，"
@@ -897,35 +976,40 @@ private:
 		if (log) {
 			log->log_line("");
 			log->log_line(summary.c_str());
-			log->set_progress(processed, (int)results.size(), changed, no_candidate, skipped, failed);
+			log->set_progress(processed, (int)results.size(), cleanup_mode ? deleted : changed,
+				cleanup_mode ? no_backup : no_candidate, skipped, failed);
 			log->finish(aborted);
 		}
 
 		if (!log)
-			popup_message::g_show(summary, tags_mode ? "标签补全" : "内嵌歌词");
+			popup_message::g_show(summary, tags_mode ? "标签补全"
+				: cleanup_mode ? "删除备份的歌词" : "内嵌歌词");
 	}
 };
 
 std::shared_ptr<batch_log> g_active_log;
 
 void start_batch(const metadb_handle_list& items, bool dry_run, batch_mode mode) {
+	const char* popup_title = mode == batch_mode::cleanup ? "删除备份的歌词" : "内嵌歌词";
 	if (items.get_size() == 0) {
-		popup_message::g_show("当前播放列表没有可处理的曲目。", "内嵌歌词");
+		popup_message::g_show("当前播放列表没有可处理的曲目。", popup_title);
 		return;
 	}
 	if (g_active_log && !g_active_log->is_finished()) {
-		popup_message::g_show("已有整理任务正在运行，请等待其完成。", "内嵌歌词");
+		popup_message::g_show("已有整理任务正在运行，请等待其完成。", popup_title);
 		return;
 	}
 
-	const char* title = mode == batch_mode::tags
-		? "根据文件名推断标签"
+	const char* title = mode == batch_mode::tags ? "根据文件名推断标签"
+		: mode == batch_mode::cleanup ? "删除备份的歌词"
 		: (dry_run ? "检测内嵌歌词" : "整理内嵌歌词");
 
 	auto aborter = std::make_shared<abort_callback_impl>();
-	auto log = create_log_window(title, aborter);
+	auto log = mode == batch_mode::cleanup
+		? create_log_window(title, aborter, "删除", "无备份")
+		: create_log_window(title, aborter);
 	if (!log) {
-		popup_message::g_show("无法创建日志窗口。", "内嵌歌词");
+		popup_message::g_show("无法创建日志窗口。", popup_title);
 		return;
 	}
 	g_active_log = log;
@@ -952,16 +1036,18 @@ const GUID g_menu_group = { 0x8f6b1c2a, 0x4b7e, 0x4d21, { 0x9a, 0x3c, 0x11, 0x22
 const GUID g_cmd_apply = { 0x8f6b1c2a, 0x4b7e, 0x4d21, { 0x9a, 0x3c, 0x11, 0x22, 0x33, 0x44, 0x55, 0x67 } };
 const GUID g_cmd_check = { 0x8f6b1c2a, 0x4b7e, 0x4d21, { 0x9a, 0x3c, 0x11, 0x22, 0x33, 0x44, 0x55, 0x68 } };
 const GUID g_cmd_tags = { 0x8f6b1c2a, 0x4b7e, 0x4d21, { 0x9a, 0x3c, 0x11, 0x22, 0x33, 0x44, 0x55, 0x6b } };
+const GUID g_cmd_cleanup = { 0x8f6b1c2a, 0x4b7e, 0x4d21, { 0x9a, 0x3c, 0x11, 0x22, 0x33, 0x44, 0x55, 0x6d } };
 const GUID g_cmd_config = { 0x8f6b1c2a, 0x4b7e, 0x4d21, { 0x9a, 0x3c, 0x11, 0x22, 0x33, 0x44, 0x55, 0x6c } };
 
 class lyrics_menu_commands : public mainmenu_commands {
 public:
-	t_uint32 get_command_count() override { return 4; }
+	t_uint32 get_command_count() override { return 5; }
 
 	GUID get_command(t_uint32 index) override {
 		if (index == 0) return g_cmd_apply;
 		if (index == 1) return g_cmd_check;
 		if (index == 2) return g_cmd_tags;
+		if (index == 3) return g_cmd_cleanup;
 		return g_cmd_config;
 	}
 
@@ -969,6 +1055,7 @@ public:
 		if (index == 0) out = "扫描并整理内嵌歌词";
 		else if (index == 1) out = "仅检测内嵌歌词（不写入）";
 		else if (index == 2) out = "根据文件名推断标签";
+		else if (index == 3) out = "删除备份的歌词";
 		else out = "编辑配置";
 	}
 
@@ -976,6 +1063,7 @@ public:
 		if (index == 0) out = "扫描选中曲目（未选中时为整个播放列表），按规范校验并联网补全内嵌歌词。";
 		else if (index == 1) out = "只检测不写入，结束后在控制台和报告中查看判定结果。";
 		else if (index == 2) out = "仅按文件名模板补全 TITLE/ARTIST，不检测或搜索歌词。";
+		else if (index == 3) out = "删除选中曲目（未选中时为整个播放列表）的 ORIGINAL_LYRICS 备份 Tag，不影响 LYRICS；操作不可撤销。";
 		else out = "打开 foo_lyrics_embed_config.txt，配置并发、忽略目录与文件名模板。";
 		return true;
 	}
@@ -983,7 +1071,7 @@ public:
 	GUID get_parent() override { return g_menu_group; }
 
 	void execute(t_uint32 index, ctx_t) override {
-		if (index == 3) {
+		if (index == 4) {
 			open_config_file(kConfigFileName, kConfigTemplate, "创建配置文件失败");
 			return;
 		}
@@ -994,8 +1082,26 @@ public:
 		}
 		metadb_handle_list items;
 		pm->activeplaylist_get_selected_items(items);
-		if (items.get_size() == 0)
+		const bool from_selection = items.get_size() > 0;
+		if (!from_selection)
 			pm->activeplaylist_get_all_items(items);
+
+		if (index == 3) {
+			if (items.get_size() == 0) {
+				start_batch(items, false, batch_mode::cleanup);
+				return;
+			}
+			pfc::string8 msg;
+			msg << "将从" << (from_selection ? "选中的 " : "整个播放列表的 ") << items.get_size()
+				<< " 首曲目中删除 ORIGINAL_LYRICS 备份 Tag，此操作不可撤销。\n\n"
+				<< "LYRICS 歌词本身不会被修改。\n\n是否继续？";
+			if (fb2k::messageBox(core_api::get_main_window(), msg,
+				"删除备份的歌词", MB_YESNO | MB_ICONQUESTION) != IDYES)
+				return;
+			start_batch(items, false, batch_mode::cleanup);
+			return;
+		}
+
 		start_batch(items, index == 1,
 			index == 2 ? batch_mode::tags : batch_mode::lyrics);
 	}

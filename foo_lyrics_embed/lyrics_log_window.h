@@ -18,7 +18,10 @@ public:
 };
 
 // 必须在主线程调用。aborter 用于“取消”按钮中断网络请求。
+// changed_label / no_candidate_label 自定义状态栏最后两列的名称。
 std::shared_ptr<batch_log> create_log_window(const char* title,
-	std::shared_ptr<abort_callback_impl> aborter);
+	std::shared_ptr<abort_callback_impl> aborter,
+	const char* changed_label = "修改",
+	const char* no_candidate_label = "无候选");
 
 } // namespace lyrics

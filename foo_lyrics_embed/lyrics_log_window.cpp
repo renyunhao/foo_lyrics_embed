@@ -26,8 +26,11 @@ enum {
 
 class log_window_impl : public batch_log {
 public:
-	log_window_impl(const std::string& title, std::shared_ptr<abort_callback_impl> aborter)
-		: m_title(title), m_aborter(std::move(aborter)) {}
+	log_window_impl(const std::string& title, std::shared_ptr<abort_callback_impl> aborter,
+		std::wstring changed_label, std::wstring no_candidate_label)
+		: m_title(title), m_aborter(std::move(aborter)),
+		  m_changed_label(std::move(changed_label)),
+		  m_no_candidate_label(std::move(no_candidate_label)) {}
 
 	~log_window_impl() override {
 		HWND hwnd = m_hwnd.load();
@@ -86,6 +89,8 @@ public:
 private:
 	std::string m_title;
 	std::shared_ptr<abort_callback_impl> m_aborter;
+	std::wstring m_changed_label;
+	std::wstring m_no_candidate_label;
 
 	std::atomic<bool> m_cancel{false};
 	std::atomic<bool> m_finished{false};
@@ -259,16 +264,21 @@ private:
 		}
 
 		wchar_t buf[256];
-		swprintf_s(buf, L"已完成 %d / %d      修改 %d      无候选 %d      跳过 %d      失败 %d",
-			done, total, m_changed.load(), m_no_candidate.load(), m_skipped.load(), m_failed.load());
+		swprintf_s(buf, L"已完成 %d / %d      %s %d      %s %d      跳过 %d      失败 %d",
+			done, total, m_changed_label.c_str(), m_changed.load(),
+			m_no_candidate_label.c_str(), m_no_candidate.load(), m_skipped.load(), m_failed.load());
 		SetWindowTextW(m_status, buf);
 	}
 };
 
 } // namespace
 
-std::shared_ptr<batch_log> create_log_window(const char* title, std::shared_ptr<abort_callback_impl> aborter) {
-	auto w = std::make_shared<log_window_impl>(title ? title : "", std::move(aborter));
+std::shared_ptr<batch_log> create_log_window(const char* title, std::shared_ptr<abort_callback_impl> aborter,
+	const char* changed_label, const char* no_candidate_label) {
+	pfc::stringcvt::string_wide_from_utf8 changed(changed_label ? changed_label : "修改");
+	pfc::stringcvt::string_wide_from_utf8 no_candidate(no_candidate_label ? no_candidate_label : "无候选");
+	auto w = std::make_shared<log_window_impl>(title ? title : "", std::move(aborter),
+		std::wstring(changed.get_ptr()), std::wstring(no_candidate.get_ptr()));
 	if (!w->create()) return nullptr;
 	return w;
 }
